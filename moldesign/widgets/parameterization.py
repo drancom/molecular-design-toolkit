@@ -23,42 +23,54 @@ NOTE:
 """
 import cgi
 import collections
-import re
 
 import ipywidgets as ipy
 
 from moldesign import units as u
+from moldesign import uibase
+from moldesign import utils
+
+
+def show_parameterization_results(errormessages, molin, molout=None):
+    if uibase.widgets_enabled:
+        report = ParameterizationDisplay(errormessages, molin, molout)
+        uibase.display_log(report, title='ERRORS/WARNINGS', show=True)
+
+    else:
+        print 'Forcefield assignment: %s' % ('Success' if molout is not None else 'Failure')
+        for err in errormessages:
+            print utils.html_to_text(err.desc)
+
 
 
 class ParameterizationDisplay(ipy.Box):
-    ATOMSPEC = re.compile(r'\.R<(\S+) (\d+)>\.A<(\S+) (\d+)>')
-
-    def __init__(self, job, molin, molout=None):
+    def __init__(self, errormessages, molin, molout=None):
         self.molin = molin
         self.molout = molout
-        self.job = job
-        self.msg = []
-        self.parse_errors(self.job)
+        self.msg = errormessages
 
         self.status = ipy.HTML('<h4>Forcefield assignment: %s</h4>' %
                                ('Success' if molout else 'FAILED'))
 
         self.listdesc = ipy.HTML('<b>Errors / warnings:</b>')
-        self.errorlist = ipy.Select(options=collections.OrderedDict((e.short, e) for e in self.msg))
+        error_display = collections.OrderedDict((e.short, e) for e in self.msg)
+        if len(error_display) == 0:
+            error_display['No errors or warnings.'] = StructureOk()
+        self.errorlist = ipy.Select(options=error_display)
         self.errmsg = ipy.HTML('-')
 
-        self.viewerpane = self.molin.draw()
-        self.viewer = self.viewerpane.children[0]
+        self.viewer = self.molin.draw3d()
         self.viewer.ribbon(opacity=0.7)
 
         if self.errorlist.value is not None:
             self.switch_display({'old': self.errorlist.value, 'new': self.errorlist.value})
         self.errorlist.observe(self.switch_display, 'value')
         children = (self.status,
-                    ipy.HBox([self.viewerpane, ipy.VBox([self.listdesc, self.errorlist])]),
+                    ipy.HBox([self.viewer, ipy.VBox([self.listdesc, self.errorlist])]),
                     self.errmsg)
 
         super(ParameterizationDisplay, self).__init__(children=children)
+
 
     def switch_display(self, d):
         old = d['old']
@@ -68,60 +80,36 @@ class ParameterizationDisplay(ipy.Box):
         new.show(self.viewer)
         self.errmsg.value = new.desc
 
-    def parse_errors(self, job):
-        # TODO: special messages for known problems (e.g. histidine)
-        unknown_res = set()
-        lineiter = iter(job.stdout.split('\n'))
-        reslookup = {str(i + self.molin.residues[0].pdbindex): r for i,r in enumerate(self.molin.residues)}
-
-        def _atom_from_re(s):
-            resname, residx, atomname, atomidx = s
-            r = reslookup[residx]
-            a = r[atomname]
-            return a
-
-        def unusual_bond(l):
-            atomre1, atomre2 = self.ATOMSPEC.findall(l)
-            try:
-                a1, a2 = _atom_from_re(atomre1), _atom_from_re(atomre2)
-            except KeyError:
-                a1 = a2 = None
-            r1 = reslookup[atomre1[1]]
-            r2 = reslookup[atomre2[1]]
-            self.msg.append(UnusualBond(l, (a1, a2), (r1, r2)))
-
-        while True:
-            try: line = lineiter.next()
-            except StopIteration: break
-
-            fields = line.split()
-            if fields[0:2] == ['Unknown','residue:']:
-                # EX: "Unknown residue: 3TE   number: 499   type: Terminal/beginning"
-                res = self.molin.residues[int(fields[4])]
-                self.msg.append(UnknownResidue(line,res))
-                unknown_res.add(res)
-
-            elif fields[:4] == 'Warning: Close contact of'.split():
-                # EX: "Warning: Close contact of 1.028366 angstroms between .R<DC5 1>.A<HO5' 1> and .R<DC5 81>.A<P 9>"
-                unusual_bond(line)
-
-            elif fields[:6] == 'WARNING: There is a bond of'.split():
-                # Matches two lines, EX:
-                # "WARNING: There is a bond of 34.397700 angstroms between:"
-                # "-------  .R<DG 92>.A<O3' 33> and .R<DG 93>.A<P 1>"
-                nextline = lineiter.next()
-                unusual_bond(line + nextline)
-
-            elif fields[:5] == 'Created a new atom named:'.split():
-                # EX: "Created a new atom named: P within residue: .R<DC5 81>"
-                residue = reslookup[fields[-1][:-1]]
-                if residue in unknown_res: continue  # suppress atoms from an unknown res ...
-                atom = residue[fields[5]]
-                self.msg.append(UnknownAtom(line, residue, atom))
-
 
 class ForceFieldMessage(object):
     pass
+
+
+class StructureOk(ForceFieldMessage):
+    """
+    A blank message if no other warnings are generated.
+    """
+    message = 'No errors or warnings'
+    desc = 'No errors or warnings'
+
+    def show(self, viewer):
+        viewer.ribbon(opacity=0.7)
+
+    def unshow(self, viewer):
+        pass
+
+
+class MissingTerms(ForceFieldMessage):
+    def __init__(self, message):
+        self.message = message
+        self.desc = self.message
+        self.short = self.message
+
+    def show(self, viewer):
+        viewer.ribbon(opacity=0.7)
+
+    def unshow(self, viewer):
+        pass
 
 
 class UnknownAtom(ForceFieldMessage):
@@ -136,7 +124,7 @@ class UnknownAtom(ForceFieldMessage):
                                                                          self.atom.residue.resname)
 
     def show(self, viewer):
-        viewer.licorice(atoms=self.residue.atoms, render=False)
+        viewer.licorice(atoms=self.residue.atoms)
         viewer.vdw(atoms=[self.atom])
 
     def unshow(self, viewer):
@@ -213,8 +201,6 @@ class UnusualBond(ForceFieldMessage):
                                                radius=0.1 * u.angstrom,
                                                opacity=1.0,
                                                color='red')
-        else:
-            viewer.render()
 
     def unshow(self, viewer):
         viewer.ribbon(opacity=0.7, render=False)

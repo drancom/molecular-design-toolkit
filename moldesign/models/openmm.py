@@ -12,22 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cStringIO import StringIO
-
 import moldesign.molecules
 from moldesign import compute
-from moldesign import forcefields as ff
 from moldesign.molecules import Trajectory, MolecularProperties
-from moldesign.utils import from_filepath
+from moldesign.utils import exports
 
 import moldesign.interfaces.openmm as opm
 from .base import MMBase
-
-
-def exports(o):
-    __all__.append(o.__name__)
-    return o
-__all__ = []
 
 
 @exports
@@ -46,6 +37,8 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
     def __init__(self, **kwargs):
         super(OpenMMPotential, self).__init__(**kwargs)
         self.sim = None
+        self.mm_system = None
+        self._prep_integrator = 'uninitialized'
 
     def get_openmm_simulation(self):
         if opm.force_remote:
@@ -80,11 +73,15 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
         This will rebuild this OpenMM simulation if: A) it's not built yet, or B)
         there's a new integrator
         """
+        from simtk.openmm import app
 
         # TODO: automatically set _prepped to false if the model or integration parameters change
         if not force:
-            if self._prepped and self._prep_integrator == self.mol.integrator: return
-        self._create_system()
+            if self._prepped and self._prep_integrator == self.mol.integrator:
+                return
+
+        system_params = self._get_system_params()
+        self.mm_system = self.mol.ff.parmed_obj.createSystem(**system_params)
 
         if self.mol.integrator is None:
             integrator = self._make_dummy_integrator()
@@ -92,19 +89,25 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
             integrator = self.mol.integrator.get_openmm_integrator()
 
         self._set_constraints()
-        self.sim = opm.app.Simulation(self.mm_topology, self.mm_system, integrator)
+        self.sim = app.Simulation(self.mol.ff.parmed_obj.topology, self.mm_system, integrator)
         self._prepped = True
         print 'Created OpenMM kernel (Platform: %s)' % self.sim.context.getPlatform().getName()
         self._prep_integrator = self.mol.integrator
 
+    def reset_constraints(self):
+        self._set_constraints()
+
     def minimize(self, **kwargs):
-        traj = self._minimize(**kwargs)
+        if self.constraints_supported():
+            traj = self._minimize(**kwargs)
 
-        if opm.force_remote or (not kwargs.get('wait', False)):
-            self._sync_remote(traj.mol)
-            traj.mol = self.mol
+            if opm.force_remote or (not kwargs.get('wait', False)):
+                self._sync_remote(traj.mol)
+                traj.mol = self.mol
 
-        return traj
+            return traj
+        else:
+            return super(OpenMMPotential, self).minimize(**kwargs)
 
     def _sync_remote(self, mol):
         # TODO: this is a hack to update the object after a minimization
@@ -150,29 +153,14 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
 
         return trajectory
 
-    @compute.runsremotely(enable=opm.force_remote, is_imethod=True)
-    def get_forcefield(self):
-        """ Get the force field parameters for this molecule.
-
-        Note:
-            The returned object is for introspection only; it can't be used (yet) to modify the energy model, and
-                it doesn't include the entire force field (most notably missing are periodic replicate forces,
-                1-4 nonbonded attenuation, and implicit solvent effects)
-
-        Returns:
-            moldesign.forcefield.ForceField
+    def constraints_supported(self):
+        """ Check whether this molecule's constraints can be enforced in OpenMM
         """
-        if self.mdtforcefield is None:
-            if self._prepped:
-                self.mdtforcefield = _system_to_forcefield(self.sim.system, self.mol)
-
-            elif not hasattr(self, 'mm_system'):
-                self._create_system()
-
-            self.mdtforcefield = _system_to_forcefield(self.mm_system, self.mol)
-
-        return self.mdtforcefield
-
+        for constraint in self.mol.constraints:
+            if constraint.desc not in ('position', 'distance'):
+                return False
+        else:
+            return True
 
     #################################################
     # "Private" methods for managing OpenMM are below
@@ -191,15 +179,13 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
             elif constraint.desc == 'distance':
                 self.mol.assert_atom(constraint.a1)
                 self.mol.assert_atom(constraint.a2)
-                system.addConstraint(constraint.a1,
-                                     constraint.a2,
+                system.addConstraint(constraint.a1.index,
+                                     constraint.a2.index,
                                      opm.pint2simtk(constraint.value))
 
-            else:
-                raise ValueError('OpenMM interface does not support "%s" constraints.' % constraint.desc)
-
-        # Workaround for OpenMM issue: can't have an atom that's both fixed *and* has a distance constraint.
-        # If both atoms in the distance constraint are also fixed, then we can just remove the constraint
+        # Workaround for OpenMM issue: can't have an atom that's both
+        # fixed *and* has a distance constraint. If both atoms in the distance constraint are
+        # also fixed, then we can just remove the constraint
         if len(fixed_atoms) > 0:
             num_constraints = system.getNumConstraints()
             ic = 0
@@ -210,45 +196,17 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
                 if (ai in fixed_atoms) and (aj in fixed_atoms):
                     system.removeConstraint(ic)
                     num_constraints -= 1
-                elif (ai in fixed_atoms) or (aj in fixed_atoms):  #only one is fixed
+                elif (ai in fixed_atoms) or (aj in fixed_atoms):  # only one is fixed
                     raise ValueError('In OpenMM, fixed atoms cannot be part of a constrained '
-                                     'bond (%s)'%moldesign.molecules.bonds.Bond(ai, aj))
+                                     'bond (%s)' % moldesign.molecules.bonds.Bond(ai, aj))
                 else:
                     ic += 1
 
     @staticmethod
     def _make_dummy_integrator():
-        return opm.mm.VerletIntegrator(2.0 * opm.stku.femtoseconds)
-
-    def _create_system(self):
-        # Parse the stored PRMTOP file if it's available
-        if ('amber_params' in self.mol.ff) and not hasattr(self, 'mm_prmtop'):
-            print 'Parsing stored PRMTOP file: %s' % self.mol.ff.amber_params.prmtop
-            self.mm_prmtop = from_filepath(opm.app.AmberPrmtopFile,
-                                           self.mol.ff.amber_params.prmtop)
-
-        # Create the OpenMM system
-        system_params = self._get_system_params()
-        if hasattr(self, 'mm_prmtop'):
-            self.mm_system = self.mm_prmtop.createSystem(**system_params)
-            self.mm_topology = self.mm_prmtop.topology
-            print 'Created force field using embedded prmtop file'
-        else:
-            self.mm_pdb = from_filepath(opm.app.PDBFile,
-                                        StringIO(self.mol.write(format='pdb')))
-            self.mm_topology = self.mm_pdb.topology
-            ffs = self._get_forcefield_args()
-            self.mm_forcefield = opm.app.ForceField(*self._get_forcefield_args())
-            print 'Created force field using OpenMM templates: %s' % str(ffs)
-            self.mm_system.createSystem(self.mm_topology, self.mol.name,
-                                        **system_params)
-
-    def _get_forcefield_args(self):
-        ff = self.params.forcefield[:2]
-        if ff[:5] == 'amber':
-            return ('%s.xml' % ff, 'tip3p.xml')
-        else:
-            raise NotImplementedError()
+        from simtk import unit as stku
+        from simtk import openmm
+        return openmm.VerletIntegrator(2.0 * stku.femtoseconds)
 
     def _set_openmm_state(self):  # TODO: periodic state
         self.sim.context.setPositions(opm.pint2simtk(self.mol.positions))
@@ -290,11 +248,14 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
         """ Translates the spec from MMBase into system parameter keywords for createSystem
         """
         # need cmm motion
-        nonbonded_names = {'nocutoff': opm.app.NoCutoff,
-                           'ewald': opm.app.Ewald,
-                           'pme': opm.app.PME,
-                           'cutoff': opm.app.CutoffPeriodic if self.params.periodic else opm.app.CutoffNonPeriodic}
-        implicit_solvent_names = {'obc': opm.app.OBC2}
+        from simtk.openmm import app
+        nonbonded_names = {'nocutoff': app.NoCutoff,
+                           'ewald': app.Ewald,
+                           'pme': app.PME,
+                           'cutoff': app.CutoffPeriodic if self.params.periodic else app.CutoffNonPeriodic}
+        implicit_solvent_names = {'obc': app.OBC2,
+                                  'obc1': app.OBC1,
+                                  None: None}
 
         system_params = dict(nonbondedMethod=nonbonded_names[self.params.nonbonded],
                              nonbondedCutoff=opm.pint2simtk(self.params.cutoff),
@@ -306,63 +267,12 @@ class OpenMMPotential(MMBase, opm.OpenMMPickleMixin):
             if self.mol.integrator.params.get('constrain_water', False):
                 system_params['rigidWater'] = True
             if self.mol.integrator.params.get('constrain_hbonds', False):
-                system_params['constraints'] = opm.app.HBonds
+                system_params['constraints'] = app.HBonds
 
         return system_params
 
 
 def list_openmmplatforms():
-    return [opm.mm.Platform.getPlatform(ip).getName()
-            for ip in xrange(opm.mm.Platform.getNumPlatforms())]
-
-
-def _system_to_forcefield(system, mol):
-    # TODO: 1-4 bond rules
-    # TODO: constraints
-    forces = system.getForces()
-    bonds, angles, dihedrals = [], [], []
-    charges = {}
-    ljparameters = {}
-
-    for f in forces:
-        if type(f) == opm.mm.HarmonicBondForce:
-            for ibond in xrange(f.getNumBonds()):
-                i1, i2, d0, k = f.getBondParameters(ibond)
-                bond = ff.HarmonicBondTerm(mol.atoms[i1], mol.atoms[i2],
-                                           opm.simtk2pint(k),
-                                           opm.simtk2pint(d0))
-                bonds.append(bond)
-
-        elif type(f) == opm.mm.HarmonicAngleForce:
-            for iangle in xrange(f.getNumAngles()):
-                i1, i2, i3, t0, k = f.getAngleParameters(iangle)
-                angle = ff.HarmonicAngleTerm(mol.atoms[i1], mol.atoms[i2], mol.atoms[i3],
-                                             opm.simtk2pint(k),
-                                             opm.simtk2pint(t0))
-                angles.append(angle)
-
-        elif type(f) == opm.mm.PeriodicTorsionForce:
-            for itorsion in xrange(f.getNumTorsions()):
-                i1, i2, i3, i4, n, t0, v_n = f.getTorsionParameters(itorsion)
-                torsion = ff.PeriodicTorsionTerm(mol.atoms[i1], mol.atoms[i2], mol.atoms[i3], mol.atoms[i4],
-                                                 n, opm.simtk2pint(v_n),
-                                                 opm.simtk2pint(t0))
-                dihedrals.append(torsion)
-
-        elif type(f) == opm.mm.NonbondedForce:
-            for i, atom in enumerate(mol.atoms):
-                q, sigma, epsilon = f.getParticleParameters(i)
-                charges[atom] = opm.simtk2pint(q)
-                ljparameters[atom] = ff.LennardJonesSigmaEps(atom,
-                                                             opm.simtk2pint(sigma),
-                                                             opm.simtk2pint(epsilon))
-
-        elif type(f) == opm.mm.CMMotionRemover:
-            continue
-
-        elif type(f) == opm.mm.GBSAOBCForce:
-            continue
-
-    ffparams = ff.FFParameters(bonds, angles, dihedrals, charges, ljparameters)
-    return ffparams
-
+    from simtk import openmm
+    return [openmm.Platform.getPlatform(ip).getName()
+            for ip in xrange(openmm.Platform.getNumPlatforms())]

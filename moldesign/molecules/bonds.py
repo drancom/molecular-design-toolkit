@@ -27,7 +27,8 @@ class Bond(object):
 
     Notes:
         Comparisons and hashes involving bonds will return True if the atoms involved in the bonds
-            are the same. Bond orders are not compared.
+        are the same. Bond orders are not compared.
+
         These objects are used to represent and pass bond data only - they are not used for storage.
 
     Attributes:
@@ -36,6 +37,11 @@ class Bond(object):
         order (int): bond order (can be ``None``); not used in comparisons
     """
     def __init__(self, a1, a2, order=None):
+        if a1.molecule is not a2.molecule:
+            raise ValueError('Cannot create bond for atoms in different molecules.')
+        else:
+            self.molecule = a1.molecule
+
         if a1.index > a2.index:
             a1, a2 = a2, a1
         self.a1 = a1
@@ -52,11 +58,6 @@ class Bond(object):
     def __hash__(self):
         """Has this object using the atoms involved in its bond"""
         return hash((self.a1, self.a2))
-
-    def to_json(self):
-        return dict(a1=self.a1.index,
-                    a2=self.a2.index,
-                    order=self.order)
 
     def partner(self, atom):
         """ Return this atom's *partner* in the bond -- i.e., the other atom in the bond
@@ -78,6 +79,10 @@ class Bond(object):
             raise ValueError('%s is not part of this bond' % atom)
 
     @property
+    def length(self):
+        return self.a1.distance(self.a2)
+
+    @property
     def name(self):
         """ str: name of the bond """
         return '{a1.name} (#{a1.index}) - {a2.name} (#{a2.index}) (order: {order})'.format(
@@ -88,15 +93,4 @@ class Bond(object):
         """mdt.forcefield.BondTerm: the force-field term for this bond (or ``None`` if no
             forcefield is present)
         """
-        try: ff = self.a1.molecule.energy_model.get_forcefield()
-        except (NotImplementedError, AttributeError): return None
-        return ff.bond_term[self]
-
-    def __repr__(self):
-        try:
-            return '<Bond: %s>'%str(self)
-        except:
-            print '<Bond @ %s (error in __repr__)>' % id(self)
-
-    def __str__(self):
-        return self.name
+        return self.molecule.ff.get_bond_term(self)

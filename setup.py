@@ -15,9 +15,6 @@ import os
 import sys
 from os.path import relpath, join
 
-import imp
-
-import subprocess
 from setuptools import find_packages, setup
 from setuptools.command.install import install
 
@@ -70,11 +67,12 @@ class PostInstall(install):
         self.prompt_intro()
 
     def prompt_intro(self):  # this doesn't actually display - print statements don't work?
-        print 'Thank you for installing the Molecular Design Toolkit!!!'
-        print 'For help, documentation, and any questions, visit us at '
-        print '    http://moldesign.bionano.autodesk.com.com/'
-        print '\nTo get started, please run:'
-        print ' >>> python -m moldesign intro'
+        print('Thank you for installing the Molecular Design Toolkit!!!')
+        print('For help, documentation, and any questions, visit us at ')
+        print('    http://moldesign.bionano.autodesk.com/')
+        print('\nTo get started, please run:')
+        print(' >>> python -m moldesign intro')
+
 
 cmdclass = versioneer.get_cmdclass()
 cmdclass['install'] = PostInstall
@@ -89,7 +87,7 @@ setup(
     url='http://moldesign.bionano.autodesk.com',
     cmdclass=cmdclass,
     license='Apache 2.0',
-    author='Aaron Virshup, BioNano Research at Atuodesk',
+    author='Aaron Virshup, BioNano Research at Autodesk',
     author_email='moleculardesigntoolkit@autodesk.com',
     description='The Molecular Design Toolkit: Dead-simple chemical simulation, visualization, '
                 'and cloud computing in a notebook'

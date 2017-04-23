@@ -20,8 +20,9 @@ import moldesign.molecules.atomcollections
 
 try:
     import pybel as pb
-    import openbabel as ob  # WARNING: this is the real library, not our interface - this works because of absolute (ctd)
-# imports. We should probably rename this interface
+    import openbabel as ob
+    # WARNING: this is the real library, not our interface - this works because of absolute
+    # imports. We should probably rename this interface
 except ImportError:
     force_remote = True
 else:  # this should be configurable
@@ -30,8 +31,8 @@ else:  # this should be configurable
 import moldesign as mdt
 from moldesign.compute.runsremotely import runsremotely
 import moldesign.molecules.atoms
-from moldesign.units import *
-from moldesign.molecules import biounits
+from moldesign import units as u
+from moldesign.utils import exports
 
 
 def read_file(filename, name=None, format=None):
@@ -78,7 +79,7 @@ def read_stream(filelike, format, name=None):
     Returns:
         moldesign.Molecule: parsed result
     """
-    molstring = filelike.read()
+    molstring = str(filelike.read())  # openbabel chokes on unicode
     return read_string(molstring, format, name=name)
 
 
@@ -156,8 +157,7 @@ def guess_bond_orders(mol):
 
 @runsremotely(enable=force_remote)
 def add_hydrogen(mol):
-    """Add hydrogens to saturate atomic valences. (Does not assign formal charges or correct
-        for pH).
+    """Add hydrogens to saturate atomic valences.
 
     Args:
         mol (moldesign.Molecule): Molecule to saturate
@@ -165,13 +165,40 @@ def add_hydrogen(mol):
     Returns:
         moldesign.Molecule: New molecule with all valences saturated
     """
-    # TODO: pH, formal charges
     pbmol = mol_to_pybel(mol)
-    pbmol.addh()
-    newmol = pybel_to_mol(pbmol)
+    pbmol.OBMol.AddHydrogens()
+    newmol = pybel_to_mol(pbmol, reorder_atoms_by_residue=True)
+    mdt.helpers.assign_unique_hydrogen_names(newmol)
     return newmol
 
 
+@runsremotely(enable=force_remote)
+def set_protonation(mol, ph=7.4):
+    """ Adjust protonation according to the OpenBabel pka model.
+
+    This routine will return a copy of the molecule with the new protonation state and adjusted
+    formal charges
+
+    Args:
+        mol (moldesign.Molecule): Molecule to adjust
+        ph (float): assign protonation state for this pH value
+
+    Returns:
+        moldesign.Molecule: New molecule with adjusted protonation
+    """
+    # TODO: this doesn't appear to do anything for most molecules!!!
+    # TODO: this renames hydrogens!!!
+
+    pbmol = mol_to_pybel(mol)
+    pbmol.OBMol.AddHydrogens(False, True, ph)
+
+    newmol = pybel_to_mol(pbmol, reorder_atoms_by_residue=True)
+    mdt.helpers.assign_unique_hydrogen_names(newmol)
+    mdt.assign_formal_charges(newmol, ignore_nonzero=False)
+    return newmol
+
+
+@exports
 def mol_to_pybel(mdtmol):
     """ Translate a moldesign molecule object into a pybel molecule object.
 
@@ -193,20 +220,25 @@ def mol_to_pybel(mdtmol):
         obatom = obmol.NewAtom()
         obatom.SetAtomicNum(atom.atnum)
         atommap[atom] = obatom
-        pos = atom.position.to('angstrom')._magnitude
+        pos = atom.position.value_in(u.angstrom)
         obatom.SetVector(*pos)
 
         if atom.residue and atom.residue not in resmap:
             obres = obmol.NewResidue()
             resmap[atom.residue] = obres
-            obres.SetChain(atom.chain.name[0])
-            obres.SetName(atom.residue.pdbname)
-            obres.SetNum(atom.residue.pdbindex)
+            obres.SetChain(bytes(
+                    mdt.utils.if_not_none(atom.chain.name, 'Z')[0] ))
+            obres.SetName(bytes(
+                    mdt.utils.if_not_none(atom.residue.pdbname, 'UNL') ))
+            obres.SetNum(mdt.utils.if_not_none(atom.residue.pdbindex, '0'))
         else:
             obres = resmap[atom.residue]
 
         obres.AddAtom(obatom)
-        obres.SetAtomID(obatom, atom.pdbname)
+        obres.SetHetAtom(obatom, not atom.residue.is_standard_residue)
+        obres.SetAtomID(obatom, bytes(atom.name))
+        obres.SetSerialNum(obatom,
+                           mdt.utils.if_not_none(atom.pdbindex, atom.index+1))
 
     for atom in mdtmol.bond_graph:
         a1 = atommap[atom]
@@ -216,16 +248,19 @@ def mol_to_pybel(mdtmol):
                 obmol.AddBond(a1.GetIdx(), a2.GetIdx(), order)
     obmol.EndModify()
     pbmol = pb.Molecule(obmol)
-    if hasattr(mdtmol.atoms[0], 'charge'):
-        for atom in atommap:
-            idx = atommap[atom].GetIdx()
-            obatom = obmol.GetAtom(idx)
-            obatom.SetPartialCharge(atom.charge)
-            print atommap[atom],
+
+    for atom in atommap:
+        idx = atommap[atom].GetIdx()
+        obatom = obmol.GetAtom(idx)
+        obatom.SetFormalCharge(int(atom.formal_charge.value_in(u.q_e)))
     return pbmol
 
 
-def pybel_to_mol(pbmol, atom_names=True, **kwargs):
+@exports
+def pybel_to_mol(pbmol,
+                 reorder_atoms_by_residue=False,
+                 primary_structure=True,
+                 **kwargs):
     """ Translate a pybel molecule object into a moldesign object.
 
     Note:
@@ -233,7 +268,9 @@ def pybel_to_mol(pbmol, atom_names=True, **kwargs):
 
     Args:
         pbmol (pybel.Molecule): molecule to translate
-        atom_names (bool): use pybel's atom names (default True)
+        reorder_atoms_by_residue (bool): change atom order so that all atoms in a residue are stored
+            contiguously
+        primary_structure (bool): translate primary structure data as well as atomic data
         **kwargs (dict): keyword arguments to  moldesign.Molecule __init__ method
 
     Returns:
@@ -247,58 +284,56 @@ def pybel_to_mol(pbmol, atom_names=True, **kwargs):
 
     for pybatom in pbmol.atoms:
         obres = pybatom.OBAtom.GetResidue()
-        if atom_names:
-            name = obres.GetAtomID(pybatom.OBAtom).strip()
-        else:
-            name = None
+        name = obres.GetAtomID(pybatom.OBAtom).strip()
 
         if pybatom.atomicnum == 67:
             print ("WARNING: openbabel parsed atom serial %d (name:%s) as Holmium; "
-                   "correcting to hydrogen. ")%(pybatom.OBAtom.GetIdx(), name)
+                   "correcting to hydrogen. ") % (pybatom.OBAtom.GetIdx(), name)
             atnum = 1
 
         elif pybatom.atomicnum == 0:
             print "WARNING: openbabel failed to parse atom serial %d (name:%s); guessing %s. " % (
                 pybatom.OBAtom.GetIdx(), name, name[0])
-            atnum = moldesign.core.data.ATOMIC_NUMBERS[name[0]]
+            atnum = moldesign.data.ATOMIC_NUMBERS[name[0]]
         else:
             atnum = pybatom.atomicnum
         mdtatom = moldesign.molecules.atoms.Atom(atnum=atnum, name=name,
+                                                 formal_charge=pybatom.formalcharge * u.q_e,
                                                  pdbname=name, pdbindex=pybatom.OBAtom.GetIdx())
         newatom_map[pybatom.OBAtom.GetIdx()] = mdtatom
-        mdtatom.position = pybatom.coords * angstrom
-        obres = pybatom.OBAtom.GetResidue()
-        resname = obres.GetName()
-        residx = obres.GetIdx()
-        chain_id = obres.GetChain()
-        chain_id_num = obres.GetChainNum()
+        mdtatom.position = pybatom.coords * u.angstrom
 
-        if chain_id_num not in newchains:
-            # create new chain
-            if not mdt.utils.is_printable(chain_id.strip()):
-                chain_id = backup_chain_names.pop()
-                print 'WARNING: assigned name %s to unnamed chain object @ %s' % (
-                    chain_id, hex(chain_id_num))
-            chn = biounits.Chain(pdbname=str(chain_id))
-            newchains[chain_id_num] = chn
-        else:
-            chn = newchains[chain_id_num]
+        if primary_structure:
+            obres = pybatom.OBAtom.GetResidue()
+            resname = obres.GetName()
+            residx = obres.GetIdx()
+            chain_id = obres.GetChain()
+            chain_id_num = obres.GetChainNum()
 
-        if residx not in newresidues:
-            # Create new residue
-            pdb_idx = obres.GetNum()
-            res = biounits.Residue(pdbname=resname,
-                                   pdbindex=pdb_idx)
-            newresidues[residx] = res
-            chn.add(res)
-            res.chain = chn
-        else:
-            res = newresidues[residx]
+            if chain_id_num not in newchains:
+                # create new chain
+                if not mdt.utils.is_printable(chain_id.strip()) or not chain_id.strip():
+                    chain_id = backup_chain_names.pop()
+                    print 'WARNING: assigned name %s to unnamed chain object @ %s' % (
+                        chain_id, hex(chain_id_num))
+                chn = mdt.Chain(pdbname=str(chain_id))
+                newchains[chain_id_num] = chn
+            else:
+                chn = newchains[chain_id_num]
 
-        # Assign the atom
-        if mdtatom.name in res:
-            mdtatom.name = '%s%d' % (mdtatom.name, pybatom.idx)  # prevent name clashes
-        res.add(mdtatom)
+            if residx not in newresidues:
+                # Create new residue
+                pdb_idx = obres.GetNum()
+                res = mdt.Residue(pdbname=resname,
+                                  pdbindex=pdb_idx)
+                newresidues[residx] = res
+                chn.add(res)
+                res.chain = chn
+            else:
+                res = newresidues[residx]
+
+            res.add(mdtatom)
+
         newatoms.append(mdtatom)
 
     newtopo = {}
@@ -313,6 +348,12 @@ def pybel_to_mol(pbmol, atom_names=True, **kwargs):
             newtopo[a2] = {}
         newtopo[a1][a2] = order
         newtopo[a2][a1] = order
+
+    if reorder_atoms_by_residue and primary_structure:
+        resorder = {}
+        for atom in newatoms:
+            resorder.setdefault(atom.residue, len(resorder))
+        newatoms.sort(key=lambda a: resorder[a.residue])
 
     return mdt.Molecule(newatoms,
                         bond_graph=newtopo,
@@ -332,13 +373,32 @@ def from_smiles(smi, name=None):
     Returns:
         moldesign.Molecule: the translated molecule
     """
-    if name is None: name = smi
-    pbmol = pb.readstring('smi', smi)
+    return _string_to_3d_mol(smi, 'smi', name)
+
+
+@runsremotely(enable=force_remote)
+def from_inchi(inchi, name=None):
+    """ Translate an INCHI string to a 3D structure.
+    This method uses OpenBabel to generate a plausible 3D conformation of the 2D SMILES topology.
+    We only use the first result from the conformation generator.
+
+    Args:
+        smi (str): smiles string
+        name (str): name to assign to molecule (default - the smiles string)
+
+    Returns:
+        moldesign.Molecule: the translated molecule
+    """
+    return _string_to_3d_mol(inchi, 'inchi', name)
+
+
+def _string_to_3d_mol(s, fmt, name):
+    if name is None: name = s
+    pbmol = pb.readstring(fmt, str(s))  # avoid passing unicode by casting to str
     pbmol.addh()
     pbmol.make3D()
-    mol = pybel_to_mol(pbmol, name=name, atom_names=False)
-    for atom in mol.atoms:
-        atom.name = atom.elem + str(atom.index)
-    mol._defres = mol.atoms[0].residue
-    mol._defchain = mol._defres.chain
+    mol = pybel_to_mol(pbmol,
+                       name=name,
+                       primary_structure=False)
+    mdt.helpers.atom_name_check(mol)
     return mol

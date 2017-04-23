@@ -14,17 +14,13 @@
 import pyccc
 import pyccc.exceptions
 
-from moldesign import units as u
 from moldesign import compute
-from moldesign.interfaces.openmm import OpenMMPickleMixin, force_remote, MdtReporter, pint2simtk, mm
+from moldesign.interfaces.openmm import force_remote, MdtReporter, pint2simtk, OpenMMPickleMixin
+from moldesign.utils import exports
+
 
 from .base import IntegratorBase, LangevinBase
 
-
-def exports(o):
-    __all__.append(o.__name__)
-    return o
-__all__ = []
 
 
 class OpenMMBaseIntegrator(IntegratorBase, OpenMMPickleMixin):
@@ -39,14 +35,18 @@ class OpenMMBaseIntegrator(IntegratorBase, OpenMMPickleMixin):
         self._prepped = True
 
     def run(self, run_for, wait=False):
-        # TODO: like model.minimize, this is a hacky wrapper that we need to replace with
-        # something more generalizable
+        assert self.mol.energy_model._openmm_compatible
+
+        if not self.mol.energy_model.constraints_supported():
+            raise NotImplementedError('OpenMM only supports position and bond constraints')
+
         try:
             traj = self._run(run_for)
         except pyccc.exceptions.ProgramFailure:
-            raise pyccc.exceptions.ProgramFailure('OpenMM crashed silently. Please examine the output. '
-                                       'This may be due to large forces from, for example, '
-                                       'an insufficiently minimized starting geometry.')
+            raise pyccc.exceptions.ProgramFailure(
+                    'OpenMM crashed silently. Please examine the output. '
+                    'This may be due to large forces from, for example, '
+                    'an insufficiently minimized starting geometry.')
         if force_remote or (not wait):
             self.mol.energy_model._sync_remote(traj.mol)
             traj.mol = self.mol
@@ -85,14 +85,17 @@ class OpenMMBaseIntegrator(IntegratorBase, OpenMMPickleMixin):
 @exports
 class OpenMMVerlet(OpenMMBaseIntegrator):
     def get_openmm_integrator(self):
-        integrator = mm.VerletIntegrator(pint2simtk(self.params.timestep))
+        from simtk import openmm
+        integrator = openmm.VerletIntegrator(pint2simtk(self.params.timestep))
         return integrator
 
 
 @exports
 class OpenMMLangevin(LangevinBase, OpenMMBaseIntegrator):
     def get_openmm_integrator(self):
-        integrator = mm.LangevinIntegrator(
+        from simtk import openmm
+
+        integrator = openmm.LangevinIntegrator(
             pint2simtk(self.params.temperature),
             pint2simtk(self.params.collision_rate),
             pint2simtk(self.params.timestep))

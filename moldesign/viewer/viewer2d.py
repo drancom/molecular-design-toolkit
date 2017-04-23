@@ -17,10 +17,9 @@ from IPython import display as dsp
 
 from nbmolviz.widget2d import MolViz2DBaseWidget
 
+import moldesign as mdt
 from moldesign import utils
 import moldesign.units as u
-from moldesign.data import color_rotation
-from moldesign.molecules import AtomList
 
 from . import toplevel, ColorMixin
 
@@ -52,7 +51,7 @@ class ChemicalGraphViewer(MolViz2DBaseWidget, ColorMixin):
         try:
             self.atoms = mol.atoms
         except AttributeError:
-            self.atoms = AtomList(mol)
+            self.atoms = mdt.AtomList(mol)
             self.mol = self.atoms
         else:
             self.mol = mol
@@ -61,13 +60,20 @@ class ChemicalGraphViewer(MolViz2DBaseWidget, ColorMixin):
             raise ValueError('Refusing to draw more than 200 atoms in 2D visualization. '
                              'Override this with _forcebig=True')
 
-        if names is None: self.names = [atom.name for atom in self.atoms]
+        if names is None:
+            names = []
+            for atom in self.atoms:
+                if atom.formal_charge == 0:
+                    names.append(atom.name)
+                else:
+                    names.append(atom.name + _charge_str(atom.formal_charge))
+
+        self.names = names
 
         self.atom_indices = {atom: i for i, atom in enumerate(self.atoms)}
         self.selection_group = None
         self.selection_id = None
         super(ChemicalGraphViewer, self).__init__(self.atoms, **kwargs)
-        self.set_click_callback(callback=self.handle_click)
         if display: dsp.display(self)
 
     def __reduce__(self):
@@ -78,7 +84,7 @@ class ChemicalGraphViewer(MolViz2DBaseWidget, ColorMixin):
     def to_graph(self, atoms):
         nodes, links = [], []
         for i1, atom1 in enumerate(atoms):
-            nodes.append(dict(atom=atom1.name, index=i1))
+            nodes.append(dict(atom=self.names[i1], index=i1))
             if atom1.atnum == 6 and not self.carbon_labels:
                 nodes[-1].update({'atom': '',
                                   'size': 0.5,
@@ -101,11 +107,6 @@ class ChemicalGraphViewer(MolViz2DBaseWidget, ColorMixin):
     def unset_color(self, atoms=None, render=None):
         self.set_color('white', atoms)
 
-    def handle_click(self, trait_name, old, new):
-        clicked_atoms = [self.atoms[new]]
-        if self.selection_group:
-            self.selection_group.update_selections(self, {'atoms': clicked_atoms})
-
     def handle_selection_event(self, selection):
         """ Highlight atoms in response to a selection event
 
@@ -115,6 +116,20 @@ class ChemicalGraphViewer(MolViz2DBaseWidget, ColorMixin):
         if 'atoms' in selection:
             self.highlight_atoms(
                 [a for a in selection['atoms'] if a in self.atom_indices])
+
+
+def _charge_str(q):
+    q = q.value_in(u.q_e)
+    if q == 0:
+        return ''
+    elif q == 1:
+        return '+'
+    elif q == -1:
+        return '-'
+    elif q > 0:
+        return '+%d' % q
+    else:
+        return str(q)
 
 
 @toplevel
@@ -210,7 +225,7 @@ def make_contact_view(entity, view_radius=5.0*u.ang,
                       **kwargs):
     """
 
-    :type entity: moldesign.biounits.Entity
+    :type entity: moldesign.biounits.BioContainer
     :param kwargs:
     :return:
     """

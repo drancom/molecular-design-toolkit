@@ -11,15 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import base64
-import io
 import logging
-import os
+
 from collections import OrderedDict
 
 import IPython.display
 import ipywidgets as ipy
-import traitlets
 
 import moldesign as mdt
 
@@ -33,19 +30,11 @@ STANDARD = 25  # logging level between INFO and WARN
 root = logging.getLogger('moldesign')
 root.setLevel(STANDARD)
 
-# TODO: we need to handle logging outside the widget context - what if user is in CLI?
-
 _prev_tabs = None
 _current_tabs = None
 _capture_enabled = False
 
-# TODO: Something better than this
-try:
-    ipy.Text()
-except traitlets.TraitError:
-    widgets_enabled = False
-else:
-    widgets_enabled = True
+widgets_enabled = mdt.utils.can_use_widgets()
 
 
 def display_log(obj, title=None, show=False):
@@ -129,6 +118,7 @@ def enable_logging_widgets(enable=True):
         ip.events.unregister('pre_run_cell', _capture_logging_displays)
         ip.events.unregister('post_run_cell', _finalize_logging_displays)
 
+
 if widgets_enabled:
     class LoggingTabs(StyledTab):
         def __init__(self, objects, display=False, **kwargs):
@@ -161,7 +151,9 @@ if widgets_enabled:
             if display and not self._displayed:
                 IPython.display.display(self)
                 self._displayed = True
-                if show: self.selected_index = len(self.children) - 1
+                if show:
+                    self.selected_index = len(self.children) - 1
+
 
 
 class Logger(ipy.Textarea if widgets_enabled else object):
@@ -204,7 +196,15 @@ def _capture_logging_displays(display=False, **kwargs):
 
 
 def _finalize_logging_displays(display=True, **kwargs):
-    pass
+    import pyccc.ui
+    global _current_tabs
+
+    if not _current_tabs: return
+
+    for display in _current_tabs.children:
+        if isinstance(display, pyccc.ui.JobStatusDisplay):
+            display.update()
+
 
 # FOR NOW, *always* enable the logging widgets
 enable_logging_widgets(True)

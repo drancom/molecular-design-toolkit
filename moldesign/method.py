@@ -15,12 +15,32 @@
 This module contains abstract base classes for potential models, integrators, and various
 associated data types (force fields, orbitals, basis sets, etc.).
 """
+import funcsigs
+
 import moldesign as mdt
 from moldesign.utils import DotDict
 
 
+class _InitKeywordMeta(type):
+    """ Constructs a custom call signature for __init__ based on cls.PARAMETERS.
+    """
+    @property
+    def __signature__(self):
+        if hasattr(self, '__customsig'):
+            return self.__customsig
+
+        kwargs = []
+        for param in self.PARAMETERS:
+            kwargs.append(funcsigs.Parameter(param.name,
+                                             default=param.default,
+                                             kind=funcsigs.Parameter.POSITIONAL_OR_KEYWORD))
+
+        self.__customsig = funcsigs.Signature(kwargs, __validate_parameters__=True)
+        return self.__customsig
+
+
 class Method(object):
-    """Abstract Base class for energy models and integrators
+    """Abstract Base class for energy models, integrators, and "heavy duty" simulation objects
 
     Args:
         **kwargs (dict): list of parameters for the method.
@@ -29,8 +49,15 @@ class Method(object):
        mol (mdt.Molecule): the molecule this method is associated with
     """
 
+    __metaclass__ = _InitKeywordMeta
+
     PARAMETERS = []
     """ list: list of Parameters that can be used to configure this method
+    """
+
+    PARAM_SUPPORT = {}
+    """ Mapping(str, list): List of supported values for parameters (if a parameter is not found,
+     it's assumed that all possible values are supported)
     """
 
     def __reduce__(self):
@@ -52,10 +79,8 @@ class Method(object):
             if param.name not in self.params:
                 self.params[param.name] = param.default
 
-    def to_json(self):
-        return {'params': self.params,
-                'name': type(self).__name__,
-                'version': 'MolecularDesignToolkit-%s' % mdt.__version__}
+    def __eq__(self, other):
+        return self.__class__ is other.__class__ and self.params == other.params
 
     def configure(self):
         from moldesign.widgets.configurator import Configurator

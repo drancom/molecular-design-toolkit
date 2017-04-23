@@ -34,25 +34,36 @@ class StyledTab(ipy.Tab):
 
 
 class AtomInspector(ipy.HTML, Selector):
-    def handle_selection_event(self, selection):
-        if 'atoms' not in selection: return
-        atoms = selection['atoms']
+    """
+    Turn atom indices into a value to display
+    """
+    def indices_to_value(self, atom_indices, atoms):
+        indicated_atoms = map(lambda index: atoms[index], atom_indices)
+        return self.atoms_to_value(indicated_atoms)
+
+    """
+    Turn atom objects into a value to display
+    """
+    def atoms_to_value(self, atoms):
         if len(atoms) == 0:
-            self.value = 'No selection'
+            return 'No selection'
         elif len(atoms) == 1:
             atom = atoms[0]
             res = atom.residue
             chain = res.chain
-            self.value = (
-                "<b>Molecule</b>: %s<br>" % atom.molecule.name +
-                "<b>Chain</b> %s<br>" % chain.name +
-                "<b>Residue</b> %s, index %d<br>" % (res.name, res.index) +
-                "<b>Atom</b> %s (%s), index %d<br>" % (atom.name, atom.symbol, atom.index))
+            lines = ["<b>Molecule</b>: %s<br>" % atom.molecule.name]
+            if atom.chain.name is not None:
+                lines.append("<b>Chain</b> %s<br>" % chain.name)
+            if atom.residue.type != 'placeholder':
+                lines.append("<b>Residue</b> %s, index %d<br>" % (res.name, res.index))
+            lines.append("<b>Atom</b> %s (%s), index %d<br>" % (atom.name, atom.symbol, atom.index))
+            return '\n'.join(lines)
+
         elif len(atoms) > 1:
-            atstrings = ['<b>%s</b> / res <b>%s</b> / chain <b>%s</b>' %
-                         (a.name, a.residue.resname, a.chain.name)
+            atstrings = ['<b>%s</b>, index %s / res <b>%s</b>, index %s / chain <b>%s</b>' %
+                         (a.name, a.index, a.residue.resname, a.residue.index, a.chain.name)
                          for a in atoms]
-            self.value = '<br>'.join(atstrings)
+            return '<br>'.join(atstrings)
 
 
 class ViewerToolBase(ipy.Box):
@@ -88,37 +99,22 @@ class SelBase(ViewerToolBase):
         self._atomset = collections.OrderedDict()
 
         self.atom_listname = ipy.HTML('<b>Selected atoms:</b>')
-        self.atom_list = ipy.SelectMultiple(options=collections.OrderedDict(),
-                                            height=150)
+        self.atom_list = ipy.SelectMultiple(options=list(self.viewer.selected_atom_indices), height=150)
+        traitlets.directional_link(
+            (self.viewer, 'selected_atom_indices'),
+            (self.atom_list, 'options'),
+            self._atom_indices_to_atoms
+        )
+
         self.select_all_atoms_button = ipy.Button(description='Select all atoms')
         self.select_all_atoms_button.on_click(self.select_all_atoms)
 
         self.select_none = ipy.Button(description='Clear all selections')
         self.select_none.on_click(self.clear_selections)
 
-        self.remove_button = ipy.Button(description='Unselect')
-        self.remove_button.on_click(self.handle_remove_button_click)
-
     @property
     def selected_atoms(self):
-        return self._atomset.keys()
-
-    @selected_atoms.setter
-    def selected_atoms(self, atoms):
-        self._atomset = collections.OrderedDict((atom,None) for atom in atoms)
-        self._redraw_selection_state()
-
-    def _redraw_selection_state(self):
-        self.atom_list.options = collections.OrderedDict((self.atomkey(atom), atom)
-                                                         for atom in self._atomset.keys())
-        self.viewer.highlight_atoms(self._atomset.keys(), render=False)
-        self.viewer.render()
-
-    def toggle_atom(self, atom):
-        """Toggles atom's state in and out of the selection group"""
-        if atom in self._atomset: self._atomset.pop(atom)
-        else: self._atomset[atom] = None
-        self._redraw_selection_state()
+        return self._atom_indices_to_atoms(self.viewer.selected_atom_indices)
 
     def remove_atomlist_highlight(self, *args):
         self.atom_list.value = tuple()
@@ -127,16 +123,14 @@ class SelBase(ViewerToolBase):
     def atomkey(atom):
         return '%s (index %d)' % (atom.name, atom.index)
 
-    def select_all_atoms(self, *args):
-        self.selected_atoms = self.mol.atoms
+    def _atom_indices_to_atoms(self, atom_indices):
+        return [self.mol.atoms[atom_index] for atom_index in atom_indices]
 
-    def handle_remove_button_click(self, *args):
-        if self.atom_list.value:
-            for atom in self.atom_list.value: self._atomset.pop(atom)
-            self._redraw_selection_state()
+    def select_all_atoms(self, *args):
+        self.viewer.selected_atom_indices = set(i for i, atom in enumerate(self.mol.atoms))
 
     def clear_selections(self, *args):
-        self.selected_atoms = []
+        self.viewer.selected_atom_indices = set()
 
 
 class ReadoutFloatSlider(ipy.Box):
@@ -169,6 +163,14 @@ class ReadoutFloatSlider(ipy.Box):
     def update_readout(self, *args):
         self.readout.value = self.formatstring.format(self.value)
 
+    def disable(self):
+        self.slider.disabled = True
+        self.readout.disabled = True
+
+    def enable(self):
+        self.slider.disabled = False
+        self.readout.disabled = False
+
     def parse_value(self, *args):
         try:
             f = float(self.readout.value)
@@ -182,6 +184,24 @@ class ReadoutFloatSlider(ipy.Box):
             else:
                 f = float(s[match.start():match.end()])
         self.slider.value = f
+
+
+class ReadOnlyRepr(ipy.Box):
+    """ When a value is assigned, displays its __repr__ instead
+    """
+    def __init__(self, *args, **kwargs):
+        super(ReadOnlyRepr, self).__init__(*args, **kwargs)
+        self.textbox = ipy.Text()
+        self.textbox.disabled = True
+        self.children = [self.textbox]
+
+    @property
+    def value(self):
+        return self.textbox.value
+
+    @value.setter
+    def value(self, v):
+        self.textbox.value = repr(v)
 
 
 class UnitText(ipy.Box):
@@ -217,17 +237,29 @@ class UnitText(ipy.Box):
         self.validated = ipy.HTML(self.INVALID)
         self.children = [self.textbox, self.validated]
         self._is_valid = False
-        if value is not None: self.value = value
+        if value is not None:
+            self.value = value
 
     def _validate(self, change):
+        import pint
+
         self._validated_value = None
         self._error_msg = False
 
         # Check that we can parse this
         try:
             val = u.ureg(change['new'])
-        except:  # parsing failed, pint just raises generic "Exception"
+
+        except (pint.UndefinedUnitError,
+                pint.DimensionalityError,
+                pint.compat.tokenize.TokenError):
             self._error_msg = "Failed to parse '%s'" % self.textbox.value
+
+        except Exception as e:  # unfortunately, pint's parser sometimes raises bare exception class
+            if e.__class__ != Exception:
+                raise  # this isn't what we want
+            self._error_msg = "Failed to parse '%s'" % self.textbox.value
+
         else:  # Check dimensionality
             valdim = u.get_units(val).dimensionality
             if self.dimensionality is not None and valdim != self.dimensionality:

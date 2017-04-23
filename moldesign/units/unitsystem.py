@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .quantity import *
 from .constants import *
 
 
@@ -68,22 +67,44 @@ class UnitSystem(object):
         self._momentum = f
 
     def convert(self, quantity):
-        """
-        Convert a quantity into this unit system
-        @param quantity: moldesign.external.pint.Quantity
+        """ Convert a quantity into this unit system.
+
+        Args:
+            quantity (MdtQuantity): quantity to convert
         """
         baseunit = self.get_baseunit(quantity)
-        result = quantity.to(baseunit)
-        return result
+        if isinstance(baseunit, int):
+            assert baseunit == 1
+            return quantity * ureg.dimensionless
+        else:
+            result = quantity.to(baseunit)
+            return result
 
     def get_baseunit(self, quantity):
-        # TODO: this needs to deal with angles
-        # if quantity.dimensionless: return 1.0 # don't call this - it's super-slow (Pint 0.6.1)
+        """ Get units of a quantity, list or array
 
+        Args:
+            quantity (Any): any number or list-like object with units
+
+        Raises:
+            TypeError: if the passed object cannot have units (e.g., it's a string or ``None``)
+
+        Returns:
+            MdtUnit: units found in the passed object
+        """
         try:
             dims = dict(quantity.dimensionality)
         except AttributeError:
-            try: return self.get_baseunit(quantity[0])
+            try:
+                q = quantity[0]
+            except (TypeError, StopIteration):
+                raise TypeError('This type of object cannot have physical units')
+
+            if q == quantity:
+                raise TypeError('This type of object cannot have physical units')
+
+            try:
+                return self.get_baseunit(q)
             except (IndexError, TypeError):  # Assume dimensionless
                 return 1
         baseunit = 1
@@ -105,7 +126,8 @@ class UnitSystem(object):
 
         # Otherwise, just use the units
         for unit in dims:
-            if dims[unit] == 0: continue
+            if dims[unit] == 0:
+                continue
             try:
                 baseunit *= self[unit]**dims[unit]
             except AttributeError:

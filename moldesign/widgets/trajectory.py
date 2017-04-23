@@ -25,22 +25,29 @@ class TrajectoryViewer(selector.SelectionGroup):
     """ 3D representation, with animation controls, for a trajectory.
 
     Users will typically instantiate this using ``trajectory.draw()``
+
+    Args:
+        display (bool): immediately display this to the notebook (default: False)
+        **kwargs (dict): keyword arguments for :class:`ipywidgets.Box`
     """
 
-    def __init__(self, trajectory, **kwargs):
+    def __init__(self, trajectory, display=False, **kwargs):
+        from IPython.display import display as displaynow
+
         self.default_fps = 10
         self.traj = trajectory
         self.pane = ipy.VBox()
-        trajectory.apply_frame(trajectory.frames[0])
+        trajectory._apply_frame(trajectory.frames[0])
         self.viewer, self.view_container = self.make_viewer()
         for frame in self.traj.frames[1:]:
             self.viewer.append_frame(positions=frame.positions,
-                                     wfn=frame.get('wfn',None),
-                                     render=False)
+                                     wfn=frame.get('wfn', None))
         self.make_controls()
         self.pane.children = [self.view_container, self.controls]
         super(TrajectoryViewer, self).__init__([self.pane, AtomInspector()], **kwargs)
         self.update_selections('initialization', {'framenum': 0})
+        if display:
+            displaynow(self)
 
     def make_viewer(self):
         viewer = self.traj._tempmol.draw3d(style='licorice')
@@ -88,7 +95,6 @@ class TrajectoryOrbViewer(TrajectoryViewer):
         return viewframe.viewer, viewframe
 
 
-
 class FrameInspector(ipy.HTML, selector.Selector):
     def __init__(self, traj, **kwargs):
         self.traj = traj
@@ -100,13 +106,13 @@ class FrameInspector(ipy.HTML, selector.Selector):
         else:
             framenum = selection['framenum']
 
-        if hasattr(self.traj[framenum], 'time') and self.traj[framenum].time is not None:
-            result = 'Time: %s; ' % self.traj[framenum].time.defunits()
+        if hasattr(self.traj.frames[framenum], 'time') and self.traj.frames[framenum].time is not None:
+            result = 'Time: %s; ' % self.traj.frames[framenum].time.defunits()
         else:
             result = ''
 
         try:
-            result += self.traj[framenum].annotation
+            result += self.traj.frames[framenum].annotation
         except (KeyError, AttributeError):
             pass
 
